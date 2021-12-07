@@ -363,15 +363,35 @@ func (e *Eval) List(args *structs.EvalListRequest,
 			}
 
 			var evals []*structs.Evaluation
+			itemCount := int32(0)
 			for {
 				raw := iter.Next()
 				if raw == nil {
 					break
 				}
 				eval := raw.(*structs.Evaluation)
+				if args.FilterJobID != "" && args.FilterJobID != eval.JobID {
+					continue
+				}
+				if args.FilterEvalStatus != "" && args.FilterEvalStatus != eval.Status {
+					continue
+				}
+				// TODO: direct string comparison gives us the wrong results here
+				if args.QueryOptions.NextToken != "" && args.QueryOptions.NextToken < eval.ID {
+					continue
+				}
 				evals = append(evals, eval)
+				itemCount++
+				if args.QueryOptions.PerPage != 0 && itemCount >= args.QueryOptions.PerPage {
+					break
+				}
 			}
 			reply.Evaluations = evals
+
+			// TODO: need to add NextToken to QueryMeta or in the list response directly?
+			// if args.QueryOptions.PerPage != 0 {
+			// 	reply.QueryMeta.
+			// }
 
 			// Use the last index that affected the jobs table
 			index, err := state.Index("evals")
