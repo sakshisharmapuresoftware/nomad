@@ -8,6 +8,8 @@ references:
     ubuntu-1604:201903-01
   go-windows-image: &go_windows_image
     windows-server-2019-vs2019:stable
+  go-arm64-image: &go_arm64_image
+    ubuntu-2004:202101-01
 
   # common references
   common_envs: &common_envs
@@ -45,7 +47,13 @@ commands:
               *)       echo "unknown os: ${OSTYPE}"; exit 1 ;;
             esac
 
-            curl -SL --fail -o /tmp/vault.zip https://releases.hashicorp.com/vault/"<< parameters.version >>"/vault_"<< parameters.version >>"_"${os}"_amd64.zip
+            if [[ `uname -m` = "aarch64" ]]; then
+              arch="arm64";
+            else
+              arch="amd64";
+            fi
+
+            curl -SL --fail -o /tmp/vault.zip https://releases.hashicorp.com/vault/"<< parameters.version >>"/vault_"<< parameters.version >>"_"${os}"_${arch}.zip
 
             if [[ "${os}" != "windows" ]]; then
               sudo unzip -d /usr/local/bin /tmp/vault.zip
@@ -64,7 +72,12 @@ commands:
       - run:
           name: Install Consul << parameters.version >>
           command: |
-            curl -SL --fail -o /tmp/consul.zip https://releases.hashicorp.com/consul/<< parameters.version >>/consul_<< parameters.version >>_linux_amd64.zip
+            if [[ `uname -m` = "aarch64" ]]; then
+              arch="arm64";
+            else
+              arch="amd64";
+            fi
+            curl -SL --fail -o /tmp/consul.zip https://releases.hashicorp.com/consul/<< parameters.version >>/consul_<< parameters.version >>_linux_${arch}.zip
             sudo unzip -d /usr/local/bin /tmp/consul.zip
             rm -rf /tmp/consul*
   install-golang:
@@ -87,11 +100,17 @@ commands:
               *)       echo "unknown os: ${OSTYPE}"; exit 1 ;;
             esac
 
+            if [[ `uname -m` = "aarch64" ]]; then
+              arch="arm64";
+            else
+              arch="amd64";
+            fi
+
             if [[ "${os}" != "windows" ]]
             then
               sudo rm -rf << parameters.target_directory >>/go
               sudo mkdir -p << parameters.target_directory >>
-              curl -SL --fail -o /tmp/golang.tar.gz https://dl.google.com/go/go${GOLANG_VERSION}.${os}-amd64.tar.gz
+              curl -SL --fail -o /tmp/golang.tar.gz https://dl.google.com/go/go${GOLANG_VERSION}.${os}-${arch}.tar.gz
               sudo tar -C << parameters.target_directory >> -xzf /tmp/golang.tar.gz
               rm -rf /tmp/golang.tar.gz
             else
@@ -293,6 +312,54 @@ jobs:
       goarch:
         type: string
         default: "amd64"
+      enable_race_testing:
+        type: boolean
+        default: false
+    environment:
+      GOTEST_PKGS_EXCLUDE: "<< parameters.exclude_packages >>"
+      GOTEST_PKGS: "<< parameters.test_packages >>"
+      GOTEST_MOD: "<< parameters.test_module >>"
+      GOTESTARCH: "<< parameters.goarch >>"
+      ENABLE_RACE: "<<# parameters.enable_race_testing >>TRUE<</ parameters.enable_race_testing >>"
+    steps:
+      - checkout
+      - install-golang
+      - install-buf
+      - install-consul
+      - install-vault
+      - run:
+          name: Install 32bit gcc libs
+          command: |
+            if [ ! -z $GOTESTARCH ] && [ $GOTESTARCH == "386" ]; then
+              sudo apt-get update
+              sudo apt-get install -y gcc-multilib
+            else
+              echo "Skipping 32bit lib installation while building for not 386"
+            fi
+      - run: PATH="$GOPATH/bin:/usr/local/go/bin:$PATH" make bootstrap
+      - run-tests
+      - store_test_results:
+          path: /tmp/test-reports
+      - store_artifacts:
+          path: /tmp/test-reports
+  test-machine-arm64:
+    executor: "<< parameters.executor >>"
+    parameters:
+      test_packages:
+        type: string
+        default: ""
+      test_module:
+        type: string
+        default: ""
+      exclude_packages:
+        type: string
+        default: ""
+      executor:
+        type: string
+        default: "go-machine-arm64"
+      goarch:
+        type: string
+        default: "arm64"
       enable_race_testing:
         type: boolean
         default: false
@@ -557,6 +624,13 @@ executors:
       GOTESTSUM_VERSION: 0.4.2
       VAULT_VERSION: 1.4.1
 
+  go-machine-arm64:
+    working_directory: ~/go/src/github.com/hashicorp/nomad
+    machine:
+      image: *go_arm64_image
+      resource_class: arm.medium
+    environment: *machine_env
+
 workflows:
   build-test:
     jobs:
@@ -655,6 +729,49 @@ workflows:
           # architectures.
           test_packages: "./client/fingerprint"
           goarch: "386"
+          filters: *backend_test_branches_filter
+      - test-machine-arm64:
+          name: "test-client-arm64"
+          test_packages: "./client/..."
+          # test branches are the branches that can impact unit tests
+          filters: &backend_test_branches_filter
+            branches:
+              ignore:
+                - /^.-ui\b.*/
+                - /^docs-.*/
+                - /^backport/docs-.*/
+                - /^e2e-.*/
+                - stable-website
+      - test-machine-arm64:
+          name: "test-nomad-arm64"
+          test_packages: "./nomad/..."
+          filters: *backend_test_branches_filter
+      - test-machine-arm64:
+          # API Tests run in a VM rather than container due to the FS tests
+          # requiring `mount` priviliges.
+          name: "test-api-arm64"
+          test_module: "api"
+          filters: *backend_test_branches_filter
+          enable_race_testing: true
+      - test-machine-arm64:
+          name: "test-other-arm64"
+          exclude_packages: "./api|./client|./drivers/docker|./drivers/exec|./drivers/shared/executor|./nomad|./e2e"
+          filters: *backend_test_branches_filter
+      - test-machine-arm64:
+          name: "test-docker-arm64"
+          test_packages: "./drivers/docker"
+          # docker is misbehaving in docker-machine-recent image
+          # and we get unexpected failures
+          # e.g. https://circleci.com/gh/hashicorp/nomad/3854
+          executor: go-machine-arm64
+          filters: *backend_test_branches_filter
+      - test-machine-arm64:
+          name: "test-exec-arm64"
+          test_packages: "./drivers/exec"
+          filters: *backend_test_branches_filter
+      - test-machine-arm64:
+          name: "test-shared-exec-arm64"
+          test_packages: "./drivers/shared/executor"
           filters: *backend_test_branches_filter
   website:
     when:

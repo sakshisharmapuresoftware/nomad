@@ -3,8 +3,13 @@
 set -o errexit
 
 # Make sure you grab the latest version
-VERSION=0.36.0
-DOWNLOAD=https://github.com/bufbuild/buf/releases/download/v${VERSION}/buf-Linux-x86_64
+VERSION=0.56.0
+if [ `uname -m` = "aarch64" ] ; then
+  arch="aarch64";
+else
+  arch="x86_64";
+fi
+DOWNLOAD=https://github.com/bufbuild/buf/releases/download/v${VERSION}/buf-Linux-${arch}
 
 function install() {
   if command -v buf >/dev/null; then
